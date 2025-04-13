@@ -1,0 +1,15 @@
+Verify Your Email - {{company_name}}
+
+Hi there,
+
+Thanks for joining {{company_name}}! Please confirm your email address to activate your account:
+
+{{verification_link}}
+
+This link expires in 1 hour. If you didn't create an account, please ignore this email.
+
+---
+© 2025 {{company_name}}
+{{physical_address}}
+Privacy Policy: {{privacy_policy}}
+Unsubscribe: {{unsubscirbe_url}}
