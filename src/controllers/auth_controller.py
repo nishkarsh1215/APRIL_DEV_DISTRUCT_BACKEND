@@ -92,7 +92,7 @@ class Register(Resource):
             "email": new_user.email,
             "message": "Verification email sent"
         }, 201)
-        resp.set_cookie("token", token, httponly=True) 
+        resp.set_cookie("token", token) 
         return resp
 
 @auth_ns.route('/login')
@@ -114,15 +114,22 @@ class Login(Resource):
             user.password.encode('utf-8')
         ):
             return {"error": "Invalid credentials"}, 401
+        
         token = generate_token(user.id)
         resp = make_response({
             "id": str(user.id),
             "email": user.email
         }, 200)
-        resp = redirect('http://localhost:3000')
-        resp.set_cookie("token", token, httponly=True)
-        resp.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
-        resp.headers.add('Access-Control-Allow-Credentials', 'true')
+        # Return JSON instead of redirect and set CORS headers
+        resp.set_cookie(
+            "token",
+            token,
+            httponly=True,
+        )
+        resp.headers.add("Access-Control-Allow-Origin", "http://localhost:3000")
+        resp.headers.add("Access-Control-Allow-Credentials", "true")
+        resp.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        resp.headers.add("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
         return resp
 
 @auth_ns.route('/me')

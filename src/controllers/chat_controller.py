@@ -19,7 +19,7 @@ import numpy as np
 from sklearn.cluster import KMeans
 import sys
 # Load the YOLO model
-model_yolo = YOLO('controllers\yolov8n_trained.pt')
+model_yolo = YOLO('src/controllers/yolov8n_trained.pt')
 
 # Helper Functions
 
