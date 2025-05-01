@@ -43,8 +43,8 @@ password_reset_model = auth_ns.model('PasswordReset', {
     'confirm_password': fields.String(required=True, example="newpassword123")
 })
 
-user_credits_model = auth_ns.model('UserCredits', {
-    'freeCredits': fields.Integer(example=5),
+user_token_model = auth_ns.model('UserToken', {
+    'tokens': fields.Integer(example=5),
     'emailVerified': fields.Boolean
 })
 
@@ -52,12 +52,12 @@ resend_verification_model = auth_ns.model('ResendVerificationRequest', {
     'email': fields.String(required=True, example="user@example.com")
 })
 
-@auth_ns.route('/credits')
-class UserCredits(Resource):
+@auth_ns.route('/tokens')
+class UserTokens(Resource):
     @token_required
-    @auth_ns.marshal_with(auth_ns.models['UserCredits'])
+    @auth_ns.marshal_with(auth_ns.models['UserToken'])
     def get(self, user):
-        """Get remaining credits"""
+        """Get remaining tokens"""
         return user
 
 @auth_ns.route('/register')
@@ -78,6 +78,7 @@ class Register(Resource):
             email=data['email'],
             password=hashed_pw.decode('utf-8'),
             name=data.get('name', ''),
+            profilePicture=f"https://api.dicebear.com/9.x/lorelei/svg?seed={data.get('name', '')}",
             provider='email'
         )
         
@@ -201,6 +202,7 @@ class GitHubCallback(Resource):
                         email=email,
                         provider='github',
                         githubId=str(github_id_val),
+                        profilePicture=f"https://api.dicebear.com/9.x/lorelei/svg?seed={user_data.get('name', '')}",
                         emailVerified=True
                     ).save()
                 else:
@@ -208,6 +210,7 @@ class GitHubCallback(Resource):
                         name=user_data.get('name', ''),
                         email=email,
                         provider='github',
+                        profilePicture=f"https://api.dicebear.com/9.x/lorelei/svg?seed={user_data.get('name', '')}",
                         emailVerified=True
                     ).save()
             
@@ -251,6 +254,7 @@ class GoogleCallback(Resource):
                         name=user_data.get('name', ''),
                         email=user_data['email'],
                         provider='google',
+                        profilePicture=f"https://api.dicebear.com/9.x/lorelei/svg?seed={user_data.get('name', '')}",
                         googleId=str(sub_value),
                         emailVerified=True
                     ).save()
@@ -259,6 +263,7 @@ class GoogleCallback(Resource):
                     user = User(
                         name=user_data.get('name', ''),
                         email=user_data['email'],
+                        profilePicture=f"https://api.dicebear.com/9.x/lorelei/svg?seed={user_data.get('name', '')}",
                         provider='google',
                         emailVerified=True
                     ).save()

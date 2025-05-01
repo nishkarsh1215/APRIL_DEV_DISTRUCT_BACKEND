@@ -3,14 +3,13 @@ from flask import request
 from ultralytics import YOLO
 from infra.db.models import ChatMessage, EditorMessage
 from helpers.auth_helper import token_required
-import cv2, easyocr, re
+import cv2, re
 from PIL import Image
 from io import BytesIO
 import base64
 import os
 import uuid
 import requests
-from middlewares.auth_middleware import credit_required
 from infra.swagger import api
 import google.generativeai as genai
 from infra.db.models import Chat
@@ -18,8 +17,13 @@ import json
 import numpy as np
 from sklearn.cluster import KMeans
 import sys
+import traceback
+from helpers.credit_helper import check_and_refresh_credits
+
 # Load the YOLO model
 model_yolo = YOLO('src/controllers/yolov8n_trained.pt')
+
+API_TOKEN = os.getenv('FIGMA_API_TOKEN')
 
 # Helper Functions
 
@@ -89,7 +93,6 @@ def process_image(image_data):
                     },
                     "color_distribution": dominant_colors
                 })
-        print(result_data)
         analysis = result_data
     elif mime_type == 'pdf':
         analysis = "PDF content analysis not implemented"
@@ -99,70 +102,167 @@ def process_image(image_data):
     return analysis
 
 def generate_text_response(prompt):
-    api_key = os.getenv('GOOGLE_API_KEY')
-    genai.configure(api_key=api_key)
-    generation_config = {
-    "temperature": 1,
-    "top_p": 0.95,
-    "top_k": 40,
-    "max_output_tokens": 8192,
-    "response_mime_type": "text/plain",
-    }
+    try:
+        api_key = os.getenv('GOOGLE_API_KEY')
+        if not api_key:
+            raise Exception("Missing GOOGLE_API_KEY environment variable")
+            
+        genai.configure(api_key=api_key)
+        generation_config = {
+            "temperature": 1,
+            "top_p": 0.95,
+            "top_k": 40,
+            "max_output_tokens": 8192,
+            "response_mime_type": "text/plain",
+        }
 
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-pro",
-        generation_config=generation_config,
-    )
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-pro",
+            generation_config=generation_config,
+        )
 
-    chat_session = model.start_chat(history=[])
+        chat_session = model.start_chat(history=[])
+        response = chat_session.send_message(prompt)
+        return response.text
+    except Exception as e:
+        print(f"Error in generate_text_response: {str(e)}", flush=True)
+        traceback.print_exc()
+        # Fallback response in case of error
+        return f"I'm sorry, but I encountered an error: {str(e)}"
+
+def generate_code_response(prompt, image_file=None):
+    try:
+        api_key = os.getenv('GOOGLE_API_KEY')
+        if not api_key:
+            raise Exception("Missing GOOGLE_API_KEY environment variable")
+            
+        genai.configure(api_key=api_key)
+        generation_config = {
+            "temperature": 1,
+            "top_p": 0.95,
+            "top_k": 40,
+            "max_output_tokens": 8192,
+            "response_mime_type": "application/json",
+        }
+
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-pro",  # Using a safer model choice
+            generation_config=generation_config,
+        )
+
+        chat_session = model.start_chat(history=[])
+        response = chat_session.send_message(prompt)
+        return response.text
+    except Exception as e:
+        print(f"Error in generate_code_response: {str(e)}", flush=True)
+        traceback.print_exc()
+        # Return a valid JSON as fallback
+        return json.dumps({"error": str(e)})
+
+def open_figma_file(file_key, api_token):
+    headers = {'X-Figma-Token': api_token}
+    response = requests.get(f'https://api.figma.com/v1/files/{file_key}', headers=headers)
+        
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"Error: {response.status_code}, {response.text}")
+        return None
+
+def process_figma_file_api(file_key, api_token):
+    """Process a Figma file via API and extract design information"""
+    file_data = open_figma_file(file_key, api_token)
     
-    response = chat_session.send_message(prompt)
+    if not file_data:
+        return "Failed to retrieve Figma file data"
     
-    if not api_key:
-        raise Exception("Missing GOOGLE_API_KEY environment variable")
+    # Extract document and canvas data
+    document = file_data.get('document', {})
+    canvas_nodes = document.get('children', [])
     
-    return response.text
-
-def generate_code_response(prompt):
-    api_key = os.getenv('GOOGLE_API_KEY')
-    genai.configure(api_key=api_key)
-
-    generation_config = {
-    "temperature": 1,
-    "top_p": 0.95,
-    "top_k": 40,
-    "max_output_tokens": 8192,
-    "response_mime_type": "application/json",
-    }
-
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        generation_config=generation_config,
-    )
-
-    chat_session = model.start_chat(history=[])
+    # Process the canvas and extract relevant elements
+    result_data = []
     
-    response = chat_session.send_message(prompt)
+    # Extract frame and component information
+    for canvas in canvas_nodes:
+        if canvas.get('type') == 'CANVAS':
+            for node in canvas.get('children', []):
+                if node.get('type') in ['FRAME', 'COMPONENT', 'INSTANCE']:
+                    # Extract properties
+                    element_data = {
+                        "name": node.get('name', 'Unnamed'),
+                        "type": node.get('type'),
+                        "dimensions": {
+                            "width": node.get('size', {}).get('width'),
+                            "height": node.get('size', {}).get('height')
+                        },
+                        "position": {
+                            "x": node.get('absoluteBoundingBox', {}).get('x'),
+                            "y": node.get('absoluteBoundingBox', {}).get('y')
+                        },
+                        "background": node.get('backgroundColor', {}),
+                        "children_count": len(node.get('children', []))
+                    }
+                    result_data.append(element_data)
     
+    return result_data
 
-    if not api_key:
-        raise Exception("Missing GOOGLE_API_KEY environment variable")
-    
-    return response.text
+def process_figma_file(figma_data):
+    """Process an uploaded Figma (.fig) file and extract available metadata"""
+    try:
+        # For uploaded .fig files, we can extract basic metadata
+        # Note: Full parsing of .fig binary format requires specialized tools
+        file_size = len(figma_data)
+        file_signature = figma_data[:4].hex()  # First few bytes as hex
+        
+        # Basic analysis of the file content
+        result_data = {
+            "file_type": "Figma Design File (.fig)",
+            "file_size_bytes": file_size,
+            "file_signature": file_signature,
+            "estimated_complexity": "medium" if file_size > 500000 else "simple",
+        }
+        
+        try:
+            text_sample = figma_data.decode('utf-8', errors='ignore')
+        except:
+            text_sample = str(figma_data)  # Fallback if decode fails
+        
+        # Look for potential UI elements in the binary data
+        elements = []
+        ui_patterns = ['Button', 'TextField', 'Frame', 'Text', 'Image', 'Rectangle', 'Component']
+        for pattern in ui_patterns:
+            if pattern in text_sample:
+                count = text_sample.count(pattern)
+                if count > 0:
+                    elements.append({"type": pattern, "count": count})
+        
+        result_data["detected_elements"] = elements
+        
+        return result_data
+    except Exception as e:
+        print(f"Error processing Figma file: {str(e)}")
+        return {"error": str(e)}
 
 # Define REST namespace for chat endpoints
 chat_ns = RestxNamespace('chat', description='HTTP-based chat endpoints')
 chat_model = api.model('ChatMessage', {
     'prompt': fields.String(required=True, description="Prompt message"),
     'image': fields.String(description="Base64 encoded image (optional)"),
-    'chat_id': fields.String(required=True, description="Existing chat id")
+    'chat_id': fields.String(required=True, description="Existing chat id"),
+    'figma_link': fields.String(description="Figma file link (optional)"),
+    'figma_token': fields.String(description="Figma API token (optional)")
+    # Note: figma_file will be uploaded as a file, not included in the model
 })
 
 # New model for chat creation
 chat_create_model = api.model('ChatCreate', {
     'title': fields.String(required=True, description="Chat title"),
     'prompt': fields.String(required=True, description="Initial chat prompt"),
-    'image': fields.String(description="Base64 encoded image (optional)")
+    'image': fields.String(description="Base64 encoded image (optional)"),
+    'figma_link': fields.String(description="Figma file link (optional)"),
+    'figma_token': fields.String(description="Figma API token (optional)")
+    # Note: figma_file will be uploaded as a file, not included in the model
 })
 
 chat_update_model = api.model('ChatUpdate', {
@@ -173,10 +273,13 @@ feedback_model = api.model('Feedback', {
     'feedback': fields.String(required=True, description="User feedback text")
 })
 
+# Run credit refresh check at key API endpoints
 @chat_ns.route('/history')
 class ChatHistory(Resource):
     @token_required
     def get(self, user):
+        # Check if credits need to be refreshed
+        check_and_refresh_credits()
         # Convert Chat references to ObjectIds
         chat_ids = [chat.id for chat in user.chatIds]
         chats = Chat.objects(id__in=chat_ids).order_by('-created_at')[:10]
@@ -198,220 +301,385 @@ class ChatHistory(Resource):
 
 @chat_ns.route('/send')
 class ChatSend(Resource):
-    @chat_ns.expect(chat_model, validate=True)
+    # Remove the validation requirement which is causing the 415 error
+    # @chat_ns.expect(chat_model, validate=True)
     def post(self):
-        """
-        Send a chat prompt to an existing chat, remembering earlier conversation.
-            "Generate a React code that displays the following UI elements with their respective "
-            "positions, sizes, and color distributions according to class names, first think about them according to their extracted text and rethink that whether they should be class names if their  confidence scores  are low, for example, if extracted text is 'click me' it will be a button right? so think accordingly and use colors ... if class name is field it's an input field obviously:\n\n"
-            f"\n Please generate a good website. It should look like a well-designed website. Adjust as needed—you are super good at making websites! Make a good looking website... the data that I am giving is just the reference you have to think and make it look good... also  take in consideration of positions and height width... listen they dont need to be accurate but similar butsomewhat similar to whats in height width and position. take  in consideration of dominant color as well."
-        """
-        data = request.form.to_dict() if request.form else request.get_json() or {}
-        prompt = data.get('prompt', '')
-        print("this is /send prompt", flush=True)
-        sys.stdout.flush()
-        print(prompt, flush=True)
-        sys.stdout.flush()
-        chat_id = data.get('chat_id')
-        if not chat_id:
-            return {"error": "Chat id is required"}, 400
-        token = request.cookies.get('token')
-        from helpers.auth_helper import verify_token
-        user = verify_token(token)
-        if not user:
-            if hasattr(ChatSend, 'anonymous_used') and ChatSend.anonymous_used:
-                return {"error": "Please login to continue chatting"}, 401
-            ChatSend.anonymous_used = True
-        else:
-            if user.freeCredits <= 0:
-                return {"error": "You have no more credits left"}, 403
-            user.update(dec__freeCredits=1)
-        # Process image from request.files if provided
-        image_file = request.files.get('image')
-        
-        #image_file
-        
-        if image_file:
-            try:
-                analysis = process_image(image_file)
-            except Exception as e:
-                return {"error": f"Image processing failed: {str(e)}"}, 400
-            prompt += f"\n[Image analysis: {analysis}]"
-        chat = Chat.objects(id=chat_id).first()
-        if not chat:
-            return {"error": "Chat not found"}, 404
-        # Build conversation history context from existing messages
-        history = ""
-        # Sort messages ascending by creation time
-        # for msg in sorted(chat.chat_messages, key=lambda m: m.created_at):
-        #     history += f"User: {msg.prompt}\nBot: {msg.response}\n"
-
-        # Append the new user prompt
-        full_prompt = history + f"User: {prompt}\nBot:"
-        
-        ai_response = generate_text_response(full_prompt)   #############################-------<<<<<<<
-
-        # Save the new message
-        new_msg = ChatMessage(prompt=prompt, response=ai_response)
-        new_msg.save()
-        chat.update(push__chat_messages=new_msg)
-        print("ai_res[ponse]")
-        print(f'\n\n\n{ai_response}\n\n\n\n\n', flush=True)
-        sys.stdout.flush()
-
+        try:
+            # Check if credits need to be refreshed
+            check_and_refresh_credits()
+            """
+            Send a chat prompt to an existing chat, remembering earlier conversation.
+            """
+            # Debug the incoming request
+            content_type = request.headers.get('Content-Type', '')
+            print(f"Send Content-Type received: {content_type}", flush=True)
             
-        return {
-            "chat_id": str(chat.id),
-            "message_id": str(new_msg.id),
-            "response": ai_response,
-        }, 200
+            # Handle different content types
+            if 'multipart/form-data' in content_type:
+                # This is a form submission with files
+                data = request.form.to_dict()
+            else:
+                # Try to parse as JSON
+                try:
+                    data = request.get_json(force=True) or {}  # force=True tries to parse JSON 
+                except Exception as e:
+                    print(f"Error parsing JSON: {str(e)}", flush=True)
+                    # Last resort, check if we can get form data
+                    data = request.form.to_dict() or {}
+        
+            prompt = data.get('prompt', '')
+            chat_id = data.get('chat_id')
+            print(f"Prompt: {prompt}", flush=True)
+            sys.stdout.flush()
+            
+            if not chat_id:
+                return {"error": "Chat id is required"}, 400
+                
+            token = request.cookies.get('token')
+            from helpers.auth_helper import verify_token
+            user = verify_token(token)
+            if not user:
+                if hasattr(ChatSend, 'anonymous_used') and ChatSend.anonymous_used:
+                    return {"error": "Please login to continue chatting"}, 401
+                ChatSend.anonymous_used = True
+            else:
+                if user.freeCredits <= 0:
+                    return {"error": "You have no more credits left"}, 403
+                user.update(dec__freeCredits=1)
+                
+            # Process image from request.files or data
+            image_file = request.files.get('image')
+            figma_file = request.files.get('figma_file')
+            figma_link = data.get('figma_link')
+            figma_token = API_TOKEN if data.get('figma_token') is None else data.get('figma_token')
+            
+            if image_file:
+                try:
+                    analysis = process_image(image_file)
+                    prompt += f"\n[Image analysis: {analysis}]"
+                except Exception as e:
+                    prompt += f"\n[Image analysis failed: {str(e)}]"
+                    print(f"Image processing error: {str(e)}")
+                    
+            elif figma_file:
+                try:
+                    figma_data = figma_file.read()
+                    figma_analysis = process_figma_file(figma_data)
+                    prompt += f"\n[Figma file analysis: {figma_analysis}]"
+                except Exception as e:
+                    return {"error": f"Figma file processing failed: {str(e)}"}, 400
+                    
+            elif figma_link and figma_token:
+                try:
+                    # Extract file key from Figma link
+                    file_key = figma_link.split('/')[-1]
+                    if '?' in file_key:
+                        file_key = file_key.split('?')[0]
+                    
+                    # Process the Figma file via API
+                    figma_analysis = process_figma_file_api(file_key, figma_token)
+                    prompt += f"\n[Figma API analysis: {figma_analysis}]"
+                except Exception as e:
+                    return {"error": f"Figma API processing failed: {str(e)}"}, 400
+            
+            chat = Chat.objects(id=chat_id).first()
+            if not chat:
+                return {"error": "Chat not found"}, 404
+                
+            # Build conversation history context from existing messages
+            history = ""
+            # Append the new user prompt
+            full_prompt = history + f"User: {prompt}\nBot:"
+            
+            if user:
+                word_count = len(full_prompt.split())
+                if user.freeCredits < word_count:
+                    return {"error": "You have no more credits left"}, 403
+                user.update(dec__freeCredits=word_count)
+            
+            ai_response = generate_text_response(full_prompt)
+            
+            try:
+                # Verify the response is valid JSON
+                json.loads(ai_response)
+            except:
+                # If not valid JSON, wrap it in a basic structure
+                ai_response = json.dumps({
+                    "/index.js": {
+                        "code": ai_response
+                    }
+                })
+
+            # Save the new message
+            new_msg = ChatMessage(prompt=prompt, response=ai_response)
+            new_msg.save()
+            chat.update(push__chat_messages=new_msg)
+                
+            return {
+                "chat_id": str(chat.id),
+                "message_id": str(new_msg.id),
+                "response": ai_response,
+            }, 200
+        except Exception as e:
+            print(f"Critical error in chat send: {str(e)}", flush=True)
+            traceback.print_exc()
+            return {"error": f"Failed to process request: {str(e)}"}, 500
 
 @chat_ns.route('/send-code')
-class ChatSend(Resource):
-    @chat_ns.expect(chat_model, validate=True)
+class ChatSendCode(Resource):
+    # Remove the validation requirement which is causing the 415 error
+    # @chat_ns.expect(chat_model, validate=True)
     def post(self):
-        """
-        Send a chat prompt to an existing chat to generate code response,
-        and update the related message's code attribute with the AI response.
-            "Generate a React code that displays the following UI elements with their respective "
-            "positions, sizes, and color distributions according to class names, first think about them according to their extracted text and rethink that whether they should be class names if their  confidence scores  are low, for example, if extracted text is 'click me' it will be a button right? so think accordingly and use colors ... if class name is field it's an input field obviously:\n\n"
-            f"\n Please generate a good website. It should look like a well-designed website. Adjust as needed—you are super good at making websites! Make a good looking website... the data that I am giving is just the reference you have to think and make it look good... also  take in consideration of positions and height width... listen they dont need to be accurate but similar butsomewhat similar to whats in height width and position. take  in consideration of dominant color as well."
-        """
-        data = request.form.to_dict() if request.form else request.get_json() or {}
-        prompt = data.get('prompt', '')
-        print("this is /send-code prompt", flush=True)
-        sys.stdout.flush()
-        print(prompt, flush =True)
-        sys.stdout.flush()
-        chat_id = data.get('chat_id')
-        if not chat_id:
-            return {"error": "Chat id is required"}, 400
-        token = request.cookies.get('token')
-        from helpers.auth_helper import verify_token
-        user = verify_token(token)
-        if not user:
-            if hasattr(ChatSend, 'anonymous_used') and ChatSend.anonymous_used:
-                return {"error": "Please login to continue chatting"}, 401
-            ChatSend.anonymous_used = True
-        else:
-            if user.freeCredits <= 0:
-                return {"error": "You have no more credits left"}, 403
-            user.update(dec__freeCredits=1)
-        # Process image from request.files if provided
-        image_file = request.files.get('image')
-        if image_file:
+        try:
+            """
+            Send a chat prompt to an existing chat to generate code response,
+            and update the related message's code attribute with the AI response.
+            """
+            # Debug the incoming request
+            content_type = request.headers.get('Content-Type', '')
+            print(f"Send-code Content-Type received: {content_type}", flush=True)
+            print(f"Send-code Form data: {request.form}", flush=True)
+            print(f"Send-code Files: {request.files}", flush=True)
+            
+            # Handle different content types
+            if 'multipart/form-data' in content_type:
+                # This is a form submission with files
+                data = request.form.to_dict()
+            else:
+                # Try to parse as JSON
+                try:
+                    data = request.get_json(force=True) or {}  # force=True tries to parse JSON even if Content-Type is wrong
+                except Exception as e:
+                    print(f"Error parsing JSON: {str(e)}", flush=True)
+                    # Last resort, check if we can get form data
+                    data = request.form.to_dict() or {}
+            
+            prompt = data.get('prompt', '')
+            chat_id = data.get('chat_id')
+            print(f"Send Code Prompt: {prompt}", flush=True)
+            sys.stdout.flush()
+            
+            if not chat_id:
+                return {"error": "Chat id is required"}, 400
+                
+            token = request.cookies.get('token')
+            from helpers.auth_helper import verify_token
+            user = verify_token(token)
+            if not user:
+                if hasattr(ChatSendCode, 'anonymous_used') and ChatSendCode.anonymous_used:
+                    return {"error": "Please login to continue chatting"}, 401
+                ChatSendCode.anonymous_used = True
+            else:
+                if user.freeCredits <= 0:
+                    return {"error": "You have no more credits left"}, 403
+                user.update(dec__freeCredits=1)
+            
+            # Process image or figma file from request.files
             try:
-                analysis = process_image(image_file)
+                image_file = request.files.get('image')
+                figma_file = request.files.get('figma_file')
+                figma_link = data.get('figma_link')
+                figma_token = API_TOKEN if data.get('figma_token') is None else data.get('figma_token')
+                
+                if image_file:
+                    try:
+                        analysis = process_image(image_file)
+                        prompt += f"\n[Image analysis: {analysis}]"
+                    except Exception as e:
+                        print(f"Image processing error: {str(e)}", flush=True)
+                        
+                elif figma_file:
+                    try:
+                        figma_data = figma_file.read()
+                        figma_analysis = process_figma_file(figma_data)
+                        prompt += f"\n[Figma file analysis: {figma_analysis}]"
+                    except Exception as e:
+                        print(f"Figma file processing error: {str(e)}", flush=True)
+                        
+                elif figma_link and figma_token:
+                    try:
+                        # Extract file key from Figma link
+                        file_key = figma_link.split('/')[-1]
+                        if '?' in file_key:
+                            file_key = file_key.split('?')[0]
+                        
+                        # Process the Figma file via API
+                        figma_analysis = process_figma_file_api(file_key, figma_token)
+                        prompt += f"\n[Figma API analysis: {figma_analysis}]"
+                    except Exception as e:
+                        print(f"Figma API processing error: {str(e)}", flush=True)
             except Exception as e:
-                return {"error": f"Image processing failed: {str(e)}"}, 400
-            prompt += f"\n[Image analysis: {analysis}]"
-        chat = Chat.objects(id=chat_id).first()
-        if not chat:
-            return {"error": "Chat not found"}, 404
-        # Build conversation history context from existing messages
-        history = ""
-        # Sort messages ascending by creation time
-        # for msg in sorted(chat.chat_messages, key=lambda m: m.created_at):
-        #     history += f"User: {msg.prompt}\nBot: {msg.response}\n"
-        # Append the new user prompt
-        full_prompt = history + f"User: {prompt}\nBot: "
-        ai_response = generate_code_response(full_prompt)
-        # Create a new message with code response stored in the code attribute
-        new_msg = EditorMessage(prompt=prompt, response=ai_response)
-        new_msg.save()
-        chat.update(push__editor_messages=new_msg)
-        
-        print("codeeeeeeeeeeeeeeeeeeeeeeeee", flush=True)
-        sys.stdout.flush()
+                print(f"Error in file processing: {str(e)}", flush=True)
+                
+            # Continue with chat processing
+            try:
+                chat = Chat.objects(id=chat_id).first()
+                if not chat:
+                    return {"error": "Chat not found"}, 404
+                    
+                # Build conversation history context from existing messages
+                history = ""
+                # Append the new user prompt
+                full_prompt = history + f"User: {prompt}\nBot:"
+                
+                if user:
+                    word_count = len(full_prompt.split())
+                    if user.freeCredits < word_count:
+                        return {"error": "You have no more credits left"}, 403
+                    user.update(dec__freeCredits=word_count)
+                
+                ai_response = generate_code_response(full_prompt, image_file)
+                
+                print(f"Send Code Response: {ai_response}", flush=True)
+                sys.stdout.flush()
 
-        print(f'\n\n{ai_response}\n\n\n\n\n\n\n', flush=True)
-        sys.stdout.flush()
-
-        return {
-            "chat_id": str(chat.id),
-            "message_id": str(new_msg.id),
-            "response": ai_response,
-            "new_message": {
-                "id": str(new_msg.id),
-                "prompt": new_msg.prompt,
-                "response": new_msg.response
-            }
-        }, 200
-
-def generate_and_update_message(chat_id, message_id, prompt):
-    # Re-fetch chat and message from DB
-    chat = Chat.objects(id=chat_id).first()
-    message = EditorMessage.objects(id=message_id).first()
-    if not chat or not message:
-        return
-    # Build full prompt (here, no history because it's the first message)
-    full_prompt = f"User: {prompt}\nBot: "
-    ai_response = generate_text_response(full_prompt)
-    print("update the message docccccccccccccccccc", flush =True)
-    sys.stdout.flush()
-    print(f'\n\n\n{ai_response}\n\n', flush=True)
-    sys.stdout.flush()
-
-
-    
-    # Update the message document with AI response and code
-    message.response = ai_response
-    message.save()
+                # Save the new message
+                new_msg = EditorMessage(prompt=prompt, response=ai_response)
+                new_msg.save()
+                chat.update(push__editor_messages=new_msg)
+                
+                return {
+                    "chat_id": str(chat.id),
+                    "message_id": str(new_msg.id),
+                    "response": ai_response,
+                    "new_message": {
+                        "id": str(new_msg.id),
+                        "prompt": new_msg.prompt,
+                        "response": new_msg.response
+                    }
+                }, 200
+            except Exception as e:
+                print(f"Error in chat processing: {str(e)}", flush=True)
+                return {"error": f"Failed to process request: {str(e)}"}, 500
+        except Exception as e:
+            print(f"Critical error in code send: {str(e)}", flush=True)
+            traceback.print_exc()
+            return {"error": f"Failed to process request: {str(e)}"}, 500
 
 @chat_ns.route('/create')
 class ChatCreate(Resource):
-    @chat_ns.expect(chat_create_model, validate=True)
+    # Remove the validation requirement which is causing the 415 error
+    # @chat_ns.expect(chat_create_model, validate=True)
     def post(self, **kwargs):
-        print("create route create route", flush=True)
-        sys.stdout.flush()
-        token = request.cookies.get('token')
-        user = None
-        if token and token.strip():
-            from helpers.auth_helper import verify_token
-            user = verify_token(token)
-        if not user:
-            if request.cookies.get("anonymousCreated"):
-                return {"error": "Unauthenticated user cannot create multiple chats"}, 401
-        
-        data = request.get_json()
-        title = data.get('title')
-        prompt = data.get('prompt', '')
-        print("this is /create route", flush=True)
-        sys.stdout.flush()
-        print(prompt, flush =True)
-        sys.stdout.flush()
-        full_prompt = prompt  # initialize full_prompt to prompt
-        # Process image if provided
-        image_data = data.get('image')
-        if image_data:
+        """Create a new chat with optional image or Figma file"""
+        try:
+            # Check if credits need to be refreshed
+            check_and_refresh_credits()
+            
+            # Get user info
+            token = request.cookies.get('token')
+            user = None
+            if token and token.strip():
+                from helpers.auth_helper import verify_token
+                user = verify_token(token)
+            if not user:
+                if request.cookies.get("anonymousCreated"):
+                    return {"error": "Unauthenticated user cannot create multiple chats"}, 401
+            
+            # Debug the incoming request
+            content_type = request.headers.get('Content-Type', '')
+            print(f"Create Content-Type received: {content_type}", flush=True)
+            print(f"Create Form data: {request.form}", flush=True)
+            print(f"Create Files: {request.files}", flush=True)
+            
+            # Handle different content types
+            if 'multipart/form-data' in content_type:
+                # This is a form submission with files
+                data = request.form.to_dict()
+            else:
+                # Try to parse as JSON
+                try:
+                    data = request.get_json(force=True) or {}
+                except Exception as e:
+                    print(f"Error parsing JSON: {str(e)}", flush=True)
+                    # Last resort, check if we can get form data
+                    data = request.form.to_dict() or {}
+            
+            title = data.get('title', 'New Chat')
+            prompt = data.get('prompt', '')
+            print(f"Processing with title={title}, prompt={prompt}", flush=True)
+            
+            if not prompt:
+                return {"error": "Prompt is required"}, 400
+                
+            full_prompt = prompt  # initialize full_prompt to prompt
+            
+            # Process image or Figma file if provided
+            image_data = data.get('image')
+            figma_file = request.files.get('figma_file') if request.files else None
+            figma_link = data.get('figma_link')
+            figma_token = data.get('figma_token')
+            
+            if image_data:
+                try:
+                    analysis = process_image(image_data)
+                    full_prompt += f"\n[Image analysis: {analysis}]"
+                except Exception as e:
+                    print(f"Image processing error: {str(e)}", flush=True)
+            
+            elif figma_file:
+                try:
+                    figma_data = figma_file.read()
+                    figma_analysis = process_figma_file(figma_data)
+                    full_prompt += f"\n[Figma file analysis: {figma_analysis}]"
+                except Exception as e:
+                    print(f"Figma file processing error: {str(e)}", flush=True)
+            
+            elif figma_link and figma_token:
+                try:
+                    # Extract file key from Figma link
+                    file_key = figma_link.split('/')[-1]
+                    if '?' in file_key:
+                        file_key = file_key.split('?')[0]
+                    
+                    # Process the Figma file via API
+                    figma_analysis = process_figma_file_api(file_key, figma_token)
+                    print(f"Figma API analysis: {figma_analysis}", flush=True)
+                    full_prompt += f"\n[Figma API analysis: {figma_analysis}]"
+                except Exception as e:
+                    print(f"Figma API processing error: {str(e)}", flush=True)
+            
+            # Create chat and generate response
+            new_chat = Chat(title=title, chat_messages=[], editor_messages=[])
+            new_chat.save()
+            
+            if user:
+                user.update(push__chatIds=new_chat)
+            
             try:
-                analysis = process_image(image_data)
-                full_prompt += f"\n[Image analysis: {analysis}]"
+                ai_response = generate_text_response(full_prompt)
+                new_msg = ChatMessage(prompt=prompt, response=ai_response)
+                new_msg.save()
+                new_chat.update(push__chat_messages=new_msg)
+                
+                return {
+                    "chat_id": str(new_chat.id), 
+                    "message_id": str(new_msg.id),
+                    "prompt": prompt,
+                    "response": ai_response
+                }, 201
             except Exception as e:
-                return {"error": f"Image processing failed: {str(e)}"}, 400
-        
-        new_chat = Chat(title=title, chat_messages=[], editor_messages=[])
-        new_chat.save()
-        
-        if user:
-            user.update(push__chatIds=new_chat)
-        
-        ai_response = generate_text_response(full_prompt)
-        new_msg = ChatMessage(prompt=prompt, response=ai_response)
-        new_msg.save()
-        new_chat.update(push__chat_messages=new_msg)
-        
-        print("/create", flush=True)
-        sys.stdout.flush()
-        print(f'\n\n\n{ai_response}\n\n\n', flush=True)
-        sys.stdout.flush()
-        
-        return {
-            "chat_id": str(new_chat.id), 
-            "message_id": str(new_msg.id),
-            "prompt": prompt,
-            "response": ai_response
-        }, 201
+                # If AI response fails, still return the chat but with an error message
+                error_msg = f"Failed to generate AI response: {str(e)}"
+                new_msg = ChatMessage(prompt=prompt, response=error_msg)
+                new_msg.save()
+                new_chat.update(push__chat_messages=new_msg)
+                
+                print(f"Error in AI response: {str(e)}", flush=True)
+                traceback.print_exc()
+                
+                return {
+                    "chat_id": str(new_chat.id), 
+                    "message_id": str(new_msg.id),
+                    "prompt": prompt,
+                    "response": error_msg,
+                    "error": "Generated fallback response due to error"
+                }, 201
+                
+        except Exception as e:
+            print(f"Critical error in chat creation: {str(e)}", flush=True)
+            traceback.print_exc()
+            return {"error": f"Failed to create chat: {str(e)}"}, 500
 
 @chat_ns.route('/<chat_id>')
 class ChatDetail(Resource):
@@ -430,17 +698,15 @@ class ChatDetail(Resource):
         user.update(pull__chatIds=chat)
         # Delete the chat
         chat.delete()
-        return {"message": "Chat deleted"}
+        return {"message": "Chat deleted"}, 200
 
     @chat_ns.expect(chat_update_model)
     @token_required
     def patch(self, user, chat_id):
         """Update chat details (e.g., title)"""
-        from infra.db.models import Chat
         chat = Chat.objects(id=chat_id).first()
         if not chat or chat not in user.chatIds:
             return {"error": "Unauthorized"}, 401
-        
         data = request.get_json()
         chat.update(set__title=data['title'])
         return {"message": "Chat updated successfully"}, 200
@@ -465,7 +731,6 @@ class MessageDetail(Resource):
 class ChatMessages(Resource):
     @token_required
     def get(self, user, chat_id):
-        from infra.db.models import Chat
         chat = Chat.objects(id=chat_id).first()
         if not chat:
             return {"error": "Chat not found"}, 404
@@ -496,22 +761,16 @@ class ChatMessages(Resource):
                 "response": m.response,
                 "created_at": str(m.created_at) if m.created_at else None
             })
-        print("\n\n\n\n")
-        print("editor messages")
-        print(editor_messages_list, flush=True)
         sys.stdout.flush()
-        print("\n\n\n\n")
-            
         return {
             "chat_messages": chat_messages_list,
             "editor_message": editor_messages_list[-1] if editor_messages_list else None
-            }, 200
+        }, 200
 
 @chat_ns.route('/<chat_id>/message/<message_id>/like')
 class MessageLike(Resource):
     @token_required
     def post(self, user, chat_id, message_id):
-        from infra.db.models import Chat
         chat = Chat.objects(id=chat_id).first()
         if not chat or str(chat.id) not in [str(c.id) for c in user.chatIds]:
             return {"error": "Unauthorized"}, 401
@@ -526,7 +785,6 @@ class MessageLike(Resource):
 class MessageDislike(Resource):
     @token_required
     def post(self, user, chat_id, message_id):
-        from infra.db.models import Chat
         chat = Chat.objects(id=chat_id).first()
         if not chat or str(chat.id) not in [str(c.id) for c in user.chatIds]:
             return {"error": "Unauthorized"}, 401
@@ -542,7 +800,6 @@ class EditorMessageAPI(Resource):
     """
     Routes related to EditorMessage associated with a given ChatMessage.
     """
-
     def get(self, chat_id, chat_message_id):
         """
         Fetch the EditorMessage details (including its JSON response) for a ChatMessage.
@@ -568,26 +825,25 @@ class EditorMessageAPI(Resource):
         Update the last EditorMessage.response JSON (file-based code) for the given Chat.
         Accepts a JSON body with file paths + code updates.
         """
-        from infra.db.models import Chat  # ensure Chat is imported here if not already
         chat = Chat.objects(id=chat_id).first()
         if not chat or not chat.editor_messages:
             return {"error": "EditorMessage not found"}, 404
 
         # Grab the last EditorMessage from the chat's editor_messages list
         editor_msg = chat.editor_messages[-1]
-
-        data = request.get_json()
-        # Merge or overwrite existing JSON response
+        # Convert the string-based JSON in editor_msg.response to dict
         try:
             existing_response = json.loads(editor_msg.response) if editor_msg.response else {}
         except ValueError:
             existing_response = {}
 
-        # If data contains 'files', overwrite the response with its content
+        # Merge or overwrite existing JSON response
+        data = request.get_json()
         if "files" in data:
             existing_response = data["files"]
         else:
             existing_response.update(data)
+        
         editor_msg.response = json.dumps(existing_response)
         editor_msg.save()
         return {"message": "Editor updated successfully"}, 200
@@ -597,7 +853,6 @@ class EditorMessageCreateAPI(Resource):
     """
     Create a new EditorMessage and link it with the Chat if needed.
     """
-
     def post(self, chat_id):
         """
         Create a new EditorMessage object, optionally link it to a new or existing ChatMessage.
@@ -609,6 +864,7 @@ class EditorMessageCreateAPI(Resource):
         data = request.get_json() or {}
         prompt = data.get('prompt', 'Editor prompt')
         response_payload = data.get('response', {})  # expected to be a JSON object
+
         editor_msg = EditorMessage(prompt=prompt, response=json.dumps(response_payload))
         editor_msg.save()
         chat.update(push__editor_messages=editor_msg)
@@ -616,7 +872,7 @@ class EditorMessageCreateAPI(Resource):
             "editor_message_id": str(editor_msg.id),
             "prompt": prompt,
             "response": response_payload
-        }, 201
+        }, 200
 
 @chat_ns.route('/feedback')
 class ChatFeedback(Resource):
@@ -625,7 +881,7 @@ class ChatFeedback(Resource):
     def post(self, user):
         """Send user feedback to developers."""
         data = request.get_json() or {}
-        feedback_body = data.get('feedback', '')
         from helpers.email_helper import send_user_feedback
+        feedback_body = data.get('feedback', '')
         send_user_feedback(user.email, feedback_body)
         return {"message": "Feedback sent"}, 200

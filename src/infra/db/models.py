@@ -52,11 +52,14 @@ class User(Document):
     password = StringField()
     email = StringField(required=True, sparse=True)
     provider = StringField()
+    profilePicture = StringField()
+    plan = StringField(default="free")
     githubId = StringField(default=None, sparse=True)
     googleId = StringField(default=None, sparse=True)
     emailVerified = BooleanField(default=False)
-    freeCredits = IntField(default=1000)
+    freeCredits = IntField(default=1000000)
     chatIds = ListField(ReferenceField('Chat', reverse_delete_rule=CASCADE))
+    orderIds = ListField(StringField())
     theme = StringField(default='light')
     created_at = DateTimeField(default=datetime.datetime.now(datetime.timezone.utc))
     updated_at = DateTimeField(default=datetime.datetime.now(datetime.timezone.utc))
@@ -68,3 +71,12 @@ class User(Document):
     
     def __str__(self):
         return f"User({self.id}, {self.name})"
+
+class RefreshTracker(Document):
+    """Tracks when user credits were last refreshed"""
+    last_refresh_date = DateTimeField()
+    
+    meta = {"collection": "refresh_tracker"}
+    
+    def __str__(self):
+        return f"RefreshTracker(Last refresh: {self.last_refresh_date})"

@@ -4,12 +4,14 @@ from flask import Flask
 from dotenv import load_dotenv
 from flask_cors import CORS
 
-from controllers.auth_controller import auth_ns
 from infra.db.db_config import init_db
 from infra.swagger import api
 
 from infra.oauth.oauth_config import init_oauth
+
 from controllers.chat_controller import chat_ns         # remains as before
+from controllers.auth_controller import auth_ns
+from controllers.order_controller import order_ns
 
 load_dotenv()
 
@@ -52,5 +54,6 @@ def create_app():
     api.init_app(app)
     api.add_namespace(auth_ns, path='/api/auth')
     api.add_namespace(chat_ns, path='/api/chat')
+    api.add_namespace(order_ns, path='/api/order')
     
     return app
