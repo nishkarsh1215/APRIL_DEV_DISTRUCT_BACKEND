@@ -1,27 +1,59 @@
-# Rimo2.0 Backend
+# DevDistruct Backend
 
-## Overview
-This project is a Flask-based backend that provides:
-- User authentication (custom login, registration, and OAuth with GitHub/Google)
-- AI features (text understanding and computer vision)
-- Persistent storage in MongoDB
-- Automatic API documentation with Flask-RESTX
+Flask-based backend service for the DevDistruct application.
 
-## Installation
-1. Clone the repository and navigate to the project folder.
-2. Ensure Python 3.10+ is installed.
-3. Install dependencies:
-   ```bash
-   pip install -r src/requirements.txt
-   ```
-4. Provide environment variables provided in `.env.example` file
-5. Run the application:
-   ```bash
-   python src/run.py
-   ```
+## Setup
 
-## Usage
-- Check out the Swagger UI at /swagger/.
+### Prerequisites
+- Python 3.8+
+- pip (Python package manager)
+
+### Installation
+
+1. Clone the repository
+2. Set up the environment using the setup script:
+
+```bash
+# Make the setup script executable
+chmod +x setup.sh
+
+# Run the setup script
+./setup.sh
+```
+
+Or manually set up your environment:
+
+```bash
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+3. Create a `.env` file in the project root with the following variables:
+```
+JWT_SECRET=your_jwt_secret
+SECRET_KEY=your_secret_key
+GITHUB_CLIENT_ID=your_github_client_id
+GITHUB_CLIENT_SECRET=your_github_client_secret
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+PORT=5000
+```
+
+## Running the Application
+
+```bash
+# Activate virtual environment (if not already activated)
+source venv/bin/activate
+
+# Run the application
+python src/run.py
+```
+
+The server will start at http://localhost:5000
 
 ## Project Structure
 ```bash

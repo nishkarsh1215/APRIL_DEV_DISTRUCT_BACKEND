@@ -19,9 +19,7 @@ from sklearn.cluster import KMeans
 import sys
 import traceback
 from helpers.credit_helper import check_and_refresh_credits
-
-# Load the YOLO model
-model_yolo = YOLO('src/controllers/yolov8n_trained.pt')
+from helpers.response_helper import clean_model_response, is_valid_json
 
 API_TOKEN = os.getenv('FIGMA_API_TOKEN')
 
@@ -29,135 +27,152 @@ API_TOKEN = os.getenv('FIGMA_API_TOKEN')
 
 class_names = ['button', 'field', 'heading', 'iframe', 'image', 'label', 'link', 'text']
 
-def analyze_gradient(image_array, num_colors=5):
-    image_rgb = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
-    pixels = image_rgb.reshape((-1, 3))
-    kmeans = KMeans(n_clusters=num_colors, random_state=42)
-    kmeans.fit(pixels)
-    dominant_colors = np.array(kmeans.cluster_centers_, dtype=int)
-    gradient_magnitude = cv2.Laplacian(cv2.cvtColor(image_array, cv2.COLOR_BGR2GRAY), cv2.CV_64F)
-    gradient_direction = cv2.phase(gradient_magnitude, gradient_magnitude, angleInDegrees=True)
-    return dominant_colors.tolist(), gradient_direction.tolist()
+genai.configure(api_key='AIzaSyBK7zo3osQfk53Bm2xA6CO-Qt1_FfMsOmo')
 
-def process_image(image_data):
-    if hasattr(image_data, 'read'):
-        image = Image.open(image_data)
-    elif isinstance(image_data, str):
-        # Handle both direct URLs and data URLs
-        if image_data.startswith("http"):
-            response = requests.get(image_data)
-            if response.status_code != 200:
-                raise Exception("Failed to retrieve image from URL")
-            image = Image.open(BytesIO(response.content))
+def load_image_from_url(image_url):
+    try:
+        response = requests.get(image_url, stream=True)
+        response.raise_for_status()
+        image = Image.open(BytesIO(response.content))
+        return image
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching image from URL: {e}")
+        return None
+    except Exception as e:
+        print(f"Error loading image: {e}")
+        return None
+
+def decode_base64_image(base64_string):
+    """
+    Decode a base64 encoded image string to a PIL Image.
+    
+    Args:
+        base64_string: Base64 encoded image string (may include data:image prefix)
+        
+    Returns:
+        PIL.Image or None: Decoded image or None if decoding fails
+    """
+    try:
+        # Check if the string is a base64 encoded image
+        if not base64_string or not isinstance(base64_string, str):
+            print("Invalid base64 string: None or not a string")
+            return None
+            
+        # Handle data URL format (e.g., data:image/jpeg;base64,/9j/4AAQ...)
+        if base64_string.startswith('data:image'):
+            # Extract the base64 data part after the comma
+            print("Processing data:image format")
+            base64_data = base64_string.split(',', 1)[1]
+            
+            # Decode the base64 string
+            image_data = base64.b64decode(base64_data)
+            
+            # Convert to PIL Image
+            image = Image.open(BytesIO(image_data))
+            print(f"Successfully decoded base64 image of size {image.size}")
+            return image
+            
+        # Handle raw base64 string without data URL prefix
+        elif len(base64_string) > 100:  # Simple check to avoid processing non-base64 strings
+            try:
+                print("Processing raw base64 string")
+                # Try to decode as a raw base64 string
+                # Ensure the base64 string has a valid length (multiple of 4)
+                padding_needed = len(base64_string) % 4
+                if padding_needed:
+                    base64_string += '=' * (4 - padding_needed)
+                
+                image_data = base64.b64decode(base64_string)
+                image = Image.open(BytesIO(image_data))
+                print(f"Successfully decoded raw base64 image of size {image.size}")
+                return image
+            except Exception as e:
+                print(f"Error decoding raw base64 string: {e}")
+                return None
         else:
-            # For data URLs, split the actual base64 content
-            parts = image_data.split('base64,')
-            if len(parts) == 2:
-                image_str = parts[1]
-            else:
-                image_str = image_data
-            image = Image.open(BytesIO(base64.b64decode(image_str)))
-    else:
-        raise Exception("Unsupported image input type")
-
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-
-    temp_path = f"temp_{uuid.uuid4()}.jpg"
-    image.save(temp_path)
-    mime_type = image.format.lower() if image.format else 'jpg'
-    if mime_type in ['png', 'jpeg', 'jpg']:
-        img = cv2.imread(temp_path)
-        results = model_yolo(img)
-        result_data = []
-        for result in results:
-            for box in result.boxes:
-                cls_id = int(box.cls[0])
-                class_name = class_names[cls_id]
-                x_min, y_min, x_max, y_max = box.xyxy[0].tolist()
-                width = x_max - x_min
-                height = y_max - y_min
-                center_x = x_min + width / 2
-                center_y = y_min + height / 2
-                cropped_image = img[int(y_min):int(y_max), int(x_min):int(x_max)]
-                dominant_colors, gradient_direction = analyze_gradient(cropped_image)
-                result_data.append({
-                    "class_id": cls_id,
-                    "class_name": class_name,
-                    "confidence": float(box.conf[0]),
-                    "bbox": {
-                        "width": width,
-                        "height": height,
-                        "center_x": center_x,
-                        "center_y": center_y
-                    },
-                    "color_distribution": dominant_colors
-                })
-        analysis = result_data
-    elif mime_type == 'pdf':
-        analysis = "PDF content analysis not implemented"
-    else:
-        analysis = "Unsupported file type"
-    os.remove(temp_path)
-    return analysis
-
-def generate_text_response(prompt):
-    try:
-        api_key = os.getenv('GOOGLE_API_KEY')
-        if not api_key:
-            raise Exception("Missing GOOGLE_API_KEY environment variable")
-            
-        genai.configure(api_key=api_key)
-        generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_mime_type": "text/plain",
-        }
-
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-pro",
-            generation_config=generation_config,
-        )
-
-        chat_session = model.start_chat(history=[])
-        response = chat_session.send_message(prompt)
-        return response.text
+            print(f"Base64 string too short: {len(base64_string)} chars")       
+        return None
     except Exception as e:
-        print(f"Error in generate_text_response: {str(e)}", flush=True)
+        print(f"Error decoding base64 image: {e}")
         traceback.print_exc()
-        # Fallback response in case of error
-        return f"I'm sorry, but I encountered an error: {str(e)}"
+        return None
 
-def generate_code_response(prompt, image_file=None):
+def prepare_content(image_data, text_prompt=""):
+    """
+    Prepare content for the AI model with text and optional image.
+    The image_data can be a URL or base64 encoded image.
+    
+    Args:
+        image_data: String URL to an image or base64 encoded image
+        text_prompt: String prompt for the AI
+        
+    Returns:
+        list: Content list for the AI model
+    """
+    content = []
+
+    # Add text prompt if provided
+    if text_prompt:
+        content.append(text_prompt)
+        print(f"Added text prompt to content: {text_prompt[:50]}...")
+
+    # Handle image data
+    if image_data:
+        # Check if it's a URL
+        if isinstance(image_data, str) and image_data.startswith(('http://', 'https://')):
+            image = load_image_from_url(image_data)
+            if image:
+                content.append(image)
+                print(f"Added image from URL: {image_data}")
+        # Check if it's a base64 encoded image
+        elif isinstance(image_data, str) and (image_data.startswith('data:image') or len(image_data) > 100):
+            image = decode_base64_image(image_data)
+            if image:
+                content.append(image)
+                print("Added image from base64 data")
+        # Handle other types or list of images
+        elif isinstance(image_data, list):
+            for item in image_data:
+                if isinstance(item, str):
+                    if item.startswith(('http://', 'https://')):
+                        image = load_image_from_url(item)
+                    else:
+                        image = decode_base64_image(item)
+                    
+                    if image:
+                        content.append(image)
+        else:
+            print(f"Unhandled image data type: {type(image_data)}")
+    
+    return content
+
+model = genai.GenerativeModel('gemini-1.5-flash')
+
+def generate_response(image_data, text_prompt=""):
+    """Generate a response from the AI model using text and optional image."""
     try:
-        api_key = os.getenv('GOOGLE_API_KEY')
-        if not api_key:
-            raise Exception("Missing GOOGLE_API_KEY environment variable")
-            
-        genai.configure(api_key=api_key)
-        generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_mime_type": "application/json",
-        }
+        # Prepare content
+        content = prepare_content(image_data, text_prompt)
 
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-pro",  # Using a safer model choice
-            generation_config=generation_config,
-        )
+        if not content:
+            print("No valid content (images or text) to send.")
+            return "I couldn't process your request. Please provide valid text or image content."
 
-        chat_session = model.start_chat(history=[])
-        response = chat_session.send_message(prompt)
-        return response.text
+        # Send to model and get response
+        print(f"Sending content to model with length: {len(content)}")
+        response = model.generate_content(content)
+        raw_response = response.text
+        
+        # Clean the response to remove markdown artifacts
+        cleaned_response = clean_model_response(raw_response)
+        print(f"Raw response first 100 chars: {raw_response[:100]}...")
+        print(f"Cleaned response first 100 chars: {cleaned_response[:100]}...")
+        
+        return cleaned_response
     except Exception as e:
-        print(f"Error in generate_code_response: {str(e)}", flush=True)
+        print(f"Error generating response: {e}")
         traceback.print_exc()
-        # Return a valid JSON as fallback
-        return json.dumps({"error": str(e)})
+        return f"An error occurred while processing your request: {str(e)}"
 
 def open_figma_file(file_key, api_token):
     headers = {'X-Figma-Token': api_token}
@@ -312,7 +327,6 @@ class ChatSend(Resource):
             """
             # Debug the incoming request
             content_type = request.headers.get('Content-Type', '')
-            print(f"Send Content-Type received: {content_type}", flush=True)
             
             # Handle different content types
             if 'multipart/form-data' in content_type:
@@ -347,21 +361,30 @@ class ChatSend(Resource):
                     return {"error": "You have no more credits left"}, 403
                 user.update(dec__freeCredits=1)
                 
-            # Process image from request.files or data
-            image_file = request.files.get('image')
+            # Process image from request
+            image_data = data.get('image')
+            
+            # image_data could be a URL or base64 encoded image
+            # our prepare_content function will handle both cases
+            if image_data:
+                if isinstance(image_data, str):
+                    print(f"Image data received, type: string, length: {len(image_data)}")
+                    if image_data.startswith('data:image'):
+                        print("Image format: data URL (data:image)")
+                    elif image_data.startswith(('http://', 'https://')):
+                        print(f"Image format: URL ({image_data})")
+                    else:
+                        print(f"Image format: raw base64 (first 20 chars: {image_data[:20]}...)")
+                else:
+                    print(f"Image data received, type: {type(image_data)}")
+            else:
+                print("No image data received")
+            
             figma_file = request.files.get('figma_file')
             figma_link = data.get('figma_link')
             figma_token = API_TOKEN if data.get('figma_token') is None else data.get('figma_token')
             
-            if image_file:
-                try:
-                    analysis = process_image(image_file)
-                    prompt += f"\n[Image analysis: {analysis}]"
-                except Exception as e:
-                    prompt += f"\n[Image analysis failed: {str(e)}]"
-                    print(f"Image processing error: {str(e)}")
-                    
-            elif figma_file:
+            if figma_file:
                 try:
                     figma_data = figma_file.read()
                     figma_analysis = process_figma_file(figma_data)
@@ -397,13 +420,24 @@ class ChatSend(Resource):
                     return {"error": "You have no more credits left"}, 403
                 user.update(dec__freeCredits=word_count)
             
-            ai_response = generate_text_response(full_prompt)
+            # Generate AI response - pass single URL or None, not the raw image_data
+            ai_response = generate_response(image_data, full_prompt)
             
             try:
                 # Verify the response is valid JSON
-                json.loads(ai_response)
-            except:
-                # If not valid JSON, wrap it in a basic structure
+                if is_valid_json(ai_response):
+                    # It's already valid JSON, no need to alter
+                    pass
+                else:
+                    # If not valid JSON, wrap it in a basic structure
+                    ai_response = json.dumps({
+                        "/index.js": {
+                            "code": ai_response
+                        }
+                    })
+            except Exception as e:
+                print(f"Error processing AI response: {e}", flush=True)
+                # Fallback if any error occurs during processing
                 ai_response = json.dumps({
                     "/index.js": {
                         "code": ai_response
@@ -437,9 +471,6 @@ class ChatSendCode(Resource):
             """
             # Debug the incoming request
             content_type = request.headers.get('Content-Type', '')
-            print(f"Send-code Content-Type received: {content_type}", flush=True)
-            print(f"Send-code Form data: {request.form}", flush=True)
-            print(f"Send-code Files: {request.files}", flush=True)
             
             # Handle different content types
             if 'multipart/form-data' in content_type:
@@ -474,42 +505,38 @@ class ChatSendCode(Resource):
                     return {"error": "You have no more credits left"}, 403
                 user.update(dec__freeCredits=1)
             
-            # Process image or figma file from request.files
-            try:
-                image_file = request.files.get('image')
-                figma_file = request.files.get('figma_file')
-                figma_link = data.get('figma_link')
-                figma_token = API_TOKEN if data.get('figma_token') is None else data.get('figma_token')
-                
-                if image_file:
-                    try:
-                        analysis = process_image(image_file)
-                        prompt += f"\n[Image analysis: {analysis}]"
-                    except Exception as e:
-                        print(f"Image processing error: {str(e)}", flush=True)
+            # Process image from request
+            image_data = data.get('image')
+            
+            # image_data could be a URL or base64 encoded image
+            # our prepare_content function will handle both cases
+            if image_data:
+                print(f"Image data received for code generation, length: {len(str(image_data))}")
+            
+            figma_file = request.files.get('figma_file')
+            figma_link = data.get('figma_link')
+            figma_token = API_TOKEN if data.get('figma_token') is None else data.get('figma_token')
+                   
+            if figma_file:
+                try:
+                    figma_data = figma_file.read()
+                    figma_analysis = process_figma_file(figma_data)
+                    prompt += f"\n[Figma file analysis: {figma_analysis}]"
+                except Exception as e:
+                    print(f"Figma file processing error: {str(e)}", flush=True)
                         
-                elif figma_file:
-                    try:
-                        figma_data = figma_file.read()
-                        figma_analysis = process_figma_file(figma_data)
-                        prompt += f"\n[Figma file analysis: {figma_analysis}]"
-                    except Exception as e:
-                        print(f"Figma file processing error: {str(e)}", flush=True)
+            elif figma_link and figma_token:
+                try:
+                    # Extract file key from Figma link
+                    file_key = figma_link.split('/')[-1]
+                    if '?' in file_key:
+                        file_key = file_key.split('?')[0]
                         
-                elif figma_link and figma_token:
-                    try:
-                        # Extract file key from Figma link
-                        file_key = figma_link.split('/')[-1]
-                        if '?' in file_key:
-                            file_key = file_key.split('?')[0]
-                        
-                        # Process the Figma file via API
-                        figma_analysis = process_figma_file_api(file_key, figma_token)
-                        prompt += f"\n[Figma API analysis: {figma_analysis}]"
-                    except Exception as e:
-                        print(f"Figma API processing error: {str(e)}", flush=True)
-            except Exception as e:
-                print(f"Error in file processing: {str(e)}", flush=True)
+                    # Process the Figma file via API
+                    figma_analysis = process_figma_file_api(file_key, figma_token)
+                    prompt += f"\n[Figma API analysis: {figma_analysis}]"
+                except Exception as e:
+                    print(f"Figma API processing error: {str(e)}", flush=True)
                 
             # Continue with chat processing
             try:
@@ -528,7 +555,8 @@ class ChatSendCode(Resource):
                         return {"error": "You have no more credits left"}, 403
                     user.update(dec__freeCredits=word_count)
                 
-                ai_response = generate_code_response(full_prompt, image_file)
+                # Generate AI response - pass single URL or None, not the raw image_data
+                ai_response = generate_response(image_data, full_prompt)
                 
                 print(f"Send Code Response: {ai_response}", flush=True)
                 sys.stdout.flush()
@@ -578,9 +606,6 @@ class ChatCreate(Resource):
             
             # Debug the incoming request
             content_type = request.headers.get('Content-Type', '')
-            print(f"Create Content-Type received: {content_type}", flush=True)
-            print(f"Create Form data: {request.form}", flush=True)
-            print(f"Create Files: {request.files}", flush=True)
             
             # Handle different content types
             if 'multipart/form-data' in content_type:
@@ -604,20 +629,19 @@ class ChatCreate(Resource):
                 
             full_prompt = prompt  # initialize full_prompt to prompt
             
-            # Process image or Figma file if provided
+            # Process image from request
             image_data = data.get('image')
+            
+            # image_data could be a URL or base64 encoded image
+            # our prepare_content function will handle both cases
+            if image_data:
+                print(f"Image data received for chat creation, length: {len(str(image_data))}")
+            
             figma_file = request.files.get('figma_file') if request.files else None
             figma_link = data.get('figma_link')
             figma_token = data.get('figma_token')
             
-            if image_data:
-                try:
-                    analysis = process_image(image_data)
-                    full_prompt += f"\n[Image analysis: {analysis}]"
-                except Exception as e:
-                    print(f"Image processing error: {str(e)}", flush=True)
-            
-            elif figma_file:
+            if figma_file:
                 try:
                     figma_data = figma_file.read()
                     figma_analysis = process_figma_file(figma_data)
@@ -647,7 +671,8 @@ class ChatCreate(Resource):
                 user.update(push__chatIds=new_chat)
             
             try:
-                ai_response = generate_text_response(full_prompt)
+                # Generate AI response - pass single URL or None, not the raw image_data
+                ai_response = generate_response(image_data, full_prompt)
                 new_msg = ChatMessage(prompt=prompt, response=ai_response)
                 new_msg.save()
                 new_chat.update(push__chat_messages=new_msg)
@@ -715,57 +740,103 @@ class ChatDetail(Resource):
 class MessageDetail(Resource):
     @token_required
     def get(self, user, chat_id, message_id):
-        chat = Chat.objects(id=chat_id).first()
-        if not chat or chat not in user.chatIds:
-            return {"error": "Unauthorized"}, 401
-        msg = next((m for m in chat.chat_messages if str(m.id) == message_id), None)
-        if not msg:
+        try:
+            chat = Chat.objects(id=chat_id).first()
+            if not chat or chat not in user.chatIds:
+                return {"error": "Unauthorized"}, 401
+                
+            # First check chat messages
+            msg = next((m for m in chat.chat_messages if str(m.id) == message_id), None)
+            if msg:
+                return {
+                    "message_id": str(msg.id),
+                    "prompt": msg.prompt,
+                    "response": msg.response,  # Return exact database content
+                    "message_type": "chat",
+                    "created_at": str(msg.created_at) if msg.created_at else None
+                }, 200
+                
+            # If not found in chat messages, check editor messages
+            editor_msg = next((m for m in chat.editor_messages if str(m.id) == message_id), None)
+            if editor_msg:
+                return {
+                    "message_id": str(editor_msg.id),
+                    "prompt": editor_msg.prompt,
+                    "response": editor_msg.response,  # Return exact database content
+                    "message_type": "editor",
+                    "created_at": str(editor_msg.created_at) if editor_msg.created_at else None
+                }, 200
+                
             return {"error": "Message not found"}, 404
-        return {
-            "message_id": str(msg.id),
-            "prompt": msg.prompt,
-            "response": msg.response
-        }, 200
+        except Exception as e:
+            print(f"Error fetching message detail: {e}", flush=True)
+            traceback.print_exc()
+            return {"error": f"Failed to fetch message: {str(e)}"}, 500
 
 @chat_ns.route('/<chat_id>/messages')
 class ChatMessages(Resource):
     @token_required
     def get(self, user, chat_id):
-        chat = Chat.objects(id=chat_id).first()
-        if not chat:
-            return {"error": "Chat not found"}, 404
+        try:
+            chat = Chat.objects(id=chat_id).first()
+            if not chat:
+                return {"error": "Chat not found"}, 404
 
-        chat_messages_list = []
-        editor_messages_list = []
-        for m in chat.chat_messages:
-            index_single = m.prompt.find("'")
-            index_double = m.prompt.find('"')
-            if index_single == -1:
-                index_single = len(m.prompt)
-            if index_double == -1:
-                index_double = len(m.prompt)
-            index = min(index_single, index_double)
-            prompt_text = m.prompt[:index].strip()
-            chat_messages_list.append({
-                "message_id": str(m.id),
-                "prompt": prompt_text,
-                "response": m.response,
-                "created_at": str(m.created_at) if m.created_at else None
-            })
-        for m in chat.editor_messages:
-            match = re.search(r'"([^"]+)"', m.prompt)
-            prompt_text = match.group(1) if match else m.prompt
-            editor_messages_list.append({
-                "message_id": str(m.id),
-                "prompt": prompt_text,
-                "response": m.response,
-                "created_at": str(m.created_at) if m.created_at else None
-            })
-        sys.stdout.flush()
-        return {
-            "chat_messages": chat_messages_list,
-            "editor_message": editor_messages_list[-1] if editor_messages_list else None
-        }, 200
+            # Process chat messages and preserve original response content
+            chat_messages_list = []
+            editor_messages_list = []
+            
+            # Get conversation messages
+            for m in chat.chat_messages:
+                # Extract shorter prompt for display if needed
+                index_single = m.prompt.find("'")
+                index_double = m.prompt.find('"')
+                if index_single == -1:
+                    index_single = len(m.prompt)
+                if index_double == -1:
+                    index_double = len(m.prompt)
+                index = min(index_single, index_double)
+                prompt_text = m.prompt[:index].strip()
+                
+                # Use the exact response from the database without modification
+                chat_messages_list.append({
+                    "message_id": str(m.id),
+                    "prompt": prompt_text,
+                    "full_prompt": m.prompt,  # Include full prompt for context
+                    "response": m.response,   # Keep the exact response from database
+                    "created_at": str(m.created_at) if m.created_at else None
+                })
+            
+            # Get editor messages (code-specific messages)
+            for m in chat.editor_messages:
+                # Extract shorter prompt for display
+                match = re.search(r'"([^"]+)"', m.prompt)
+                prompt_text = match.group(1) if match else m.prompt
+                
+                # Keep the exact response from database
+                editor_messages_list.append({
+                    "message_id": str(m.id),
+                    "prompt": prompt_text,
+                    "full_prompt": m.prompt,
+                    "response": m.response,  # This is the actual code from database
+                    "created_at": str(m.created_at) if m.created_at else None
+                })
+            
+            print(f"Returning {len(chat_messages_list)} chat messages and {len(editor_messages_list)} editor messages", flush=True)
+            
+            # Debug log actual content of a message if available
+            if editor_messages_list:
+                print(f"Sample editor message response (first 100 chars): {editor_messages_list[-1]['response'][:100]}...", flush=True)
+            
+            return {
+                "chat_messages": chat_messages_list,
+                "editor_messages": editor_messages_list,  # Return all editor messages as a list
+                "editor_message": editor_messages_list[-1] if editor_messages_list else None  # For backward compatibility
+            }, 200
+        except Exception as e:
+            print(f"Error fetching chat messages: {e}", flush=True)
+            traceback.print_exc()
+            return {"error": f"Failed to fetch chat messages: {str(e)}"}, 500
 
 @chat_ns.route('/<chat_id>/message/<message_id>/like')
 class MessageLike(Resource):

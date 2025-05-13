@@ -16,3 +16,5 @@ google-generativeai
 opencv-python-headless
 flask-socketio
 google-genai
+bcrypt
+razorpay
