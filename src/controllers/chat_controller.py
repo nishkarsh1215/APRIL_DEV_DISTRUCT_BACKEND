@@ -293,26 +293,51 @@ feedback_model = api.model('Feedback', {
 class ChatHistory(Resource):
     @token_required
     def get(self, user):
-        # Check if credits need to be refreshed
-        check_and_refresh_credits()
-        # Convert Chat references to ObjectIds
-        chat_ids = [chat.id for chat in user.chatIds]
-        chats = Chat.objects(id__in=chat_ids).order_by('-created_at')[:10]
-        history = []
-        for chat in chats:
-            messages = [{
-                "prompt": msg.prompt,
-                "response": msg.response,
-                "code": msg.response,
-                "created_at": str(msg.created_at) if msg.created_at else None
-            } for msg in chat.chat_messages]
-            history.append({
-                "chat_id": str(chat.id),
-                "title": chat.title,
-                "messages": messages,
-                "created_at": str(chat.created_at) if chat.created_at else None
-            })
-        return {"history": history}, 200
+        try:
+            # Check if credits need to be refreshed
+            check_and_refresh_credits()
+            
+            # Convert Chat references to ObjectIds
+            chat_ids = [chat.id for chat in user.chatIds]
+            chats = Chat.objects(id__in=chat_ids).order_by('-created_at')[:10]
+            
+            history = []
+            for chat in chats:
+                # Get all messages with their original content
+                messages = []
+                for msg in chat.chat_messages:
+                    messages.append({
+                        "message_id": str(msg.id),
+                        "prompt": msg.prompt,
+                        "response": msg.response,  # Return exact response from database
+                        "created_at": str(msg.created_at) if msg.created_at else None
+                    })
+                
+                # Get editor messages for this chat
+                editor_messages = []
+                for msg in chat.editor_messages:
+                    editor_messages.append({
+                        "message_id": str(msg.id),
+                        "prompt": msg.prompt,
+                        "response": msg.response,  # Return exact response from database
+                        "created_at": str(msg.created_at) if msg.created_at else None
+                    })
+                
+                history.append({
+                    "chat_id": str(chat.id),
+                    "title": chat.title,
+                    "messages": messages,
+                    "editor_messages": editor_messages,  # Include editor messages in history
+                    "created_at": str(chat.created_at) if chat.created_at else None,
+                    "last_message": messages[-1] if messages else None,  # Include last message for quick preview
+                })
+            
+            print(f"Returning history for {len(history)} chats", flush=True)
+            return {"history": history}, 200
+        except Exception as e:
+            print(f"Error fetching chat history: {e}", flush=True)
+            traceback.print_exc()
+            return {"error": f"Failed to fetch chat history: {str(e)}"}, 500
 
 @chat_ns.route('/send')
 class ChatSend(Resource):
@@ -736,6 +761,57 @@ class ChatDetail(Resource):
         chat.update(set__title=data['title'])
         return {"message": "Chat updated successfully"}, 200
 
+    @token_required
+    def get(self, user, chat_id):
+        """Get complete chat details with full original content"""
+        try:
+            chat = Chat.objects(id=chat_id).first()
+            if not chat:
+                return {"error": "Chat not found"}, 404
+                
+            # Check if user has access to this chat
+            if chat not in user.chatIds:
+                return {"error": "Unauthorized access to chat"}, 403
+                
+            # Return the exact chat data from the database
+            result = {
+                "chat_id": str(chat.id),
+                "title": chat.title,
+                "created_at": str(chat.created_at),
+                "messages": [],
+                "code_messages": []
+            }
+            
+            # Add chat messages with their EXACT data
+            for msg in chat.chat_messages:
+                result["messages"].append({
+                    "id": str(msg.id),
+                    "prompt": msg.prompt,
+                    "response": msg.response,  # Exactly as stored in DB
+                    "created_at": str(msg.created_at)
+                })
+            
+            # Add editor messages with their EXACT data
+            for msg in chat.editor_messages:
+                result["code_messages"].append({
+                    "id": str(msg.id),
+                    "prompt": msg.prompt,
+                    "response": msg.response,  # Exactly as stored in DB
+                    "created_at": str(msg.created_at)
+                })
+            
+            # Log what we're returning
+            print(f"Returning chat {chat_id} with {len(result['messages'])} messages")
+            if result['messages']:
+                print(f"First message id: {result['messages'][0]['id']}")
+                print(f"First message response starts with: {result['messages'][0]['response'][:50]}...")
+            
+            return result, 200
+        except Exception as e:
+            print(f"Error fetching chat details: {e}")
+            traceback.print_exc()
+            return {"error": str(e)}, 500
+
 @chat_ns.route('/<chat_id>/message/<message_id>')
 class MessageDetail(Resource):
     @token_required
@@ -956,3 +1032,62 @@ class ChatFeedback(Resource):
         feedback_body = data.get('feedback', '')
         send_user_feedback(user.email, feedback_body)
         return {"message": "Feedback sent"}, 200
+
+@chat_ns.route('/recent')
+class RecentChats(Resource):
+    """
+    Endpoint specifically for getting recent chats with their complete content
+    This preserves the exact data stored in the database
+    """
+    @token_required
+    def get(self, user):
+        try:
+            # Get the 5 most recent chats
+            chat_ids = [chat.id for chat in user.chatIds]
+            recent_chats = Chat.objects(id__in=chat_ids).order_by('-created_at')[:5]
+            
+            result = []
+            for chat in recent_chats:
+                # Get all messages with full, unmodified content
+                chat_data = {
+                    "chat_id": str(chat.id),
+                    "title": chat.title,
+                    "created_at": str(chat.created_at),
+                    "messages": [],
+                    "code_messages": []
+                }
+                
+                # Add all chat messages with their EXACT content from the database
+                for msg in chat.chat_messages:
+                    chat_data["messages"].append({
+                        "id": str(msg.id),
+                        "prompt": msg.prompt,
+                        "response": msg.response,  # Return exactly as stored
+                        "created_at": str(msg.created_at)
+                    })
+                
+                # Add all editor messages with their EXACT content from the database
+                for msg in chat.editor_messages:
+                    chat_data["code_messages"].append({
+                        "id": str(msg.id),
+                        "prompt": msg.prompt,
+                        "response": msg.response,  # Return exactly as stored
+                        "created_at": str(msg.created_at) 
+                    })
+                
+                result.append(chat_data)
+            
+            # Log what we're returning to help debug
+            print(f"Returning {len(result)} recent chats")
+            if result:
+                sample_chat = result[0]
+                print(f"Sample chat {sample_chat['chat_id']} has {len(sample_chat['messages'])} messages")
+                if sample_chat['messages']:
+                    sample_msg = sample_chat['messages'][0]
+                    print(f"First message: id={sample_msg['id']}, response_length={len(sample_msg['response'])}")
+            
+            return {"chats": result}, 200
+        except Exception as e:
+            print(f"Error in recent chats: {e}")
+            traceback.print_exc()
+            return {"error": str(e)}, 500

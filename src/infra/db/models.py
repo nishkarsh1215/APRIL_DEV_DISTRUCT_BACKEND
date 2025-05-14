@@ -13,8 +13,8 @@ from mongoengine import (
 # Define EditorMessage first so it is available for references.
 class EditorMessage(Document):
     prompt = StringField(required=True)
-    response = StringField()
-    created_at = DateTimeField(default=datetime.datetime.now(datetime.timezone.utc))
+    response = StringField()  # Keep this as raw string without processing
+    created_at = DateTimeField(default=datetime.datetime.now)
     
     meta = {"collection": "editor_messages"}
     
@@ -23,11 +23,11 @@ class EditorMessage(Document):
 
 class ChatMessage(Document):
     prompt = StringField(required=True)
-    response = StringField()
+    response = StringField()  # Keep this as raw string without processing
     likes = IntField(default=0)
     dislikes = IntField(default=0)
-    editor_message = ReferenceField('EditorMessage', reverse_delete_rule=CASCADE, null=True)
-    created_at = DateTimeField(default=datetime.datetime.now(datetime.timezone.utc))
+    editor_message = ReferenceField('EditorMessage')
+    created_at = DateTimeField(default=datetime.datetime.now)
     updated_at = DateTimeField(default=datetime.datetime.now(datetime.timezone.utc))
     
     meta = {"collection": "chat_messages"}
@@ -39,7 +39,7 @@ class Chat(Document):
     title = StringField(required=True)
     chat_messages = ListField(ReferenceField('ChatMessage', reverse_delete_rule=CASCADE))
     editor_messages = ListField(ReferenceField('EditorMessage', reverse_delete_rule=CASCADE))
-    created_at = DateTimeField(default=datetime.datetime.now(datetime.timezone.utc))
+    created_at = DateTimeField(default=datetime.datetime.now)
     updated_at = DateTimeField(default=datetime.datetime.now(datetime.timezone.utc))
     
     meta = {"collection": "chats"}
