@@ -127,7 +127,7 @@ class Login(Resource):
             token,
             httponly=True,
         )
-        resp.headers.add("Access-Control-Allow-Origin", "http://localhost:3000")
+        resp.headers.add("Access-Control-Allow-Origin", "http://147.93.111.242:3000")
         resp.headers.add("Access-Control-Allow-Credentials", "true")
         resp.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
         resp.headers.add("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
@@ -220,7 +220,7 @@ class GitHubCallback(Resource):
                 "email": user.email,
                 "token": jwt_token
             }, 200)
-            resp = redirect('http://localhost:3000')
+            resp = redirect('http://147.93.111.242:3000')
             resp.set_cookie("token", jwt_token, httponly=True)
             return resp
         except OAuthError as e:
