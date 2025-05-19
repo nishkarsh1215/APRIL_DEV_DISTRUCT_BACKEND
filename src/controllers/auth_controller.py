@@ -274,7 +274,7 @@ class GoogleCallback(Resource):
                 "email": user.email,
                 "token": jwt_token
             }, 200)
-            resp = redirect('http://localhost:3000')
+            resp = redirect('https://devdistruct.com')
             resp.set_cookie("token", jwt_token, httponly=True)
             resp.set_cookie("google_token", json.dumps(token), httponly=True)
             return resp

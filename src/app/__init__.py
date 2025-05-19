@@ -32,7 +32,7 @@ def create_app():
     init_db()
     CORS(app, supports_credentials=True, resources={
         r"/api/*": {
-            "origins": "http://147.93.111.242:3000",
+            "origins": "https://devdistruct.com",
             "allow_headers": ["Content-Type", "Authorization"],
             "expose_headers": ["Content-Length", "X-Kuma-Revision"],
             "methods": ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"]
