@@ -14,6 +14,7 @@ def init_oauth(app):
         access_token_url='https://github.com/login/oauth/access_token',
         authorize_url='https://github.com/login/oauth/authorize',
         api_base_url='https://api.github.com/',
+        redirect_uri='https://devdistruct.com/api/api/auth/callback/github',
         client_kwargs={'scope': 'user:email'},
     )
 
