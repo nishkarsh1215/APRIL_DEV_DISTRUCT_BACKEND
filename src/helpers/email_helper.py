@@ -23,7 +23,7 @@ def generate_email_verification_token(user_id):
 def send_verification_email(user):
     """Send an email with a verification link using Resend."""
     token = generate_email_verification_token(user.id)
-    FRONTEND_URL = current_app.config.get("FRONTEND_URL", "http://147.93.111.242:3000")
+    FRONTEND_URL = current_app.config.get("FRONTEND_URL", "https://devdistruct.com")
     verify_url = f"{FRONTEND_URL}/auth/verify/{token}"
     
     RESEND_API_KEY = os.getenv("RESEND_API_KEY")
