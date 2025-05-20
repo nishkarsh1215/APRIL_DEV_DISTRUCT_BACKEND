@@ -9,6 +9,8 @@ from infra.oauth.oauth_config import oauth
 from flask_restx import Namespace, Resource, fields
 from authlib.integrations.flask_client import OAuthError
 from helpers.auth_helper import generate_token, verify_token, token_required
+import logging
+import traceback
 
 from helpers.email_helper import send_verification_email, send_password_reset_email
 from helpers.password_helper import generate_password_reset_token, verify_password_reset_token
@@ -67,34 +69,65 @@ class Register(Resource):
     @auth_ns.response(400, 'Validation error')
     def post(self):
         """Register a new user"""
-        data = auth_ns.payload
-        
-        if User.objects(email=data['email']).first():
-            return {"error": "Email already exists"}, 400
-        
-        hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
-        
-        new_user = User(
-            email=data['email'],
-            password=hashed_pw.decode('utf-8'),
-            name=data.get('name', ''),
-            profilePicture=f"https://api.dicebear.com/9.x/lorelei/svg?seed={data.get('name', '')}",
-            provider='email'
-        )
-        
-        new_user.save()
-        
-        # Immediately send verification link after registration
-        send_verification_email(new_user)
-        
-        token = generate_token(new_user.id)
-        resp = make_response({
-            "id": str(new_user.id),
-            "email": new_user.email,
-            "message": "Verification email sent"
-        }, 201)
-        resp.set_cookie("token", token) 
-        return resp
+        try:
+            # Get request data
+            data = request.get_json() or {}
+            print(f"Register request data: {data}")  # Debug logging
+            
+            # Validate required fields
+            if not data.get('email'):
+                return {"error": "Email is required"}, 400
+            
+            if not data.get('password'):
+                return {"error": "Password is required"}, 400
+                
+            # Check for existing user
+            existing_user = User.objects(email=data['email']).first()
+            if existing_user:
+                print(f"Registration failed - email already exists: {data['email']}")
+                return {"error": "Email already exists"}, 400
+            
+            # Hash password
+            try:
+                hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
+            except Exception as e:
+                print(f"Password hashing error: {str(e)}")
+                return {"error": "Invalid password format"}, 400
+            
+            # Create user
+            new_user = User(
+                email=data['email'],
+                password=hashed_pw.decode('utf-8'),
+                name=data.get('name', ''),
+                profilePicture=f"https://api.dicebear.com/9.x/lorelei/svg?seed={data.get('name', '')}",
+                provider='email'
+            )
+            
+            new_user.save()
+            print(f"User created successfully: {new_user.email}")
+            
+            # Send verification email
+            try:
+                send_verification_email(new_user)
+                print(f"Verification email sent to: {new_user.email}")
+            except Exception as e:
+                print(f"Failed to send verification email: {str(e)}")
+                # Continue even if email sending fails
+            
+            # Generate token
+            token = generate_token(new_user.id)
+            resp = make_response({
+                "id": str(new_user.id),
+                "email": new_user.email,
+                "message": "Verification email sent"
+            }, 201)
+            resp.set_cookie("token", token) 
+            return resp
+            
+        except Exception as e:
+            print(f"Registration error: {str(e)}")
+            traceback.print_exc()
+            return {"error": f"Registration failed: {str(e)}"}, 500
 
 @auth_ns.route('/login')
 class Login(Resource):
@@ -107,31 +140,63 @@ class Login(Resource):
     @auth_ns.response(401, 'Invalid credentials')
     def post(self):
         """User login"""
-        data = auth_ns.payload
-        user = User.objects(email=data['email']).first()
-        
-        if not user or not bcrypt.checkpw(
-            data['password'].encode('utf-8'),
-            user.password.encode('utf-8')
-        ):
-            return {"error": "Invalid credentials"}, 401
-        
-        token = generate_token(user.id)
-        resp = make_response({
-            "id": str(user.id),
-            "email": user.email
-        }, 200)
-        # Return JSON instead of redirect and set CORS headers
-        resp.set_cookie(
-            "token",
-            token,
-            httponly=True,
-        )
-        resp.headers.add("Access-Control-Allow-Origin", "https://devdistruct.com")
-        resp.headers.add("Access-Control-Allow-Credentials", "true")
-        resp.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        resp.headers.add("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-        return resp
+        try:
+            data = request.get_json() or {}
+            print(f"Login attempt for email: {data.get('email')}")
+            
+            # Validate input
+            if not data.get('email') or not data.get('password'):
+                return {"error": "Email and password are required"}, 400
+                
+            # Find user
+            user = User.objects(email=data.get('email')).first()
+            
+            # User not found
+            if not user:
+                print(f"Login failed - no user found with email: {data.get('email')}")
+                return {"error": "Invalid credentials"}, 401
+                
+            # User found but no password set (OAuth user)
+            if not user.password:
+                print(f"Login failed - user has no password (OAuth user): {user.email}")
+                return {"error": "This account uses social login. Please login with {0}".format(user.provider.capitalize())}, 401
+            
+            # Check password
+            if not bcrypt.checkpw(
+                data['password'].encode('utf-8'),
+                user.password.encode('utf-8')
+            ):
+                print(f"Login failed - password mismatch for: {user.email}")
+                return {"error": "Invalid credentials"}, 401
+            
+            # Login successful
+            print(f"Login successful for: {user.email}")
+            token = generate_token(user.id)
+            resp = make_response({
+                "id": str(user.id),
+                "email": user.email,
+                "name": user.name
+            }, 200)
+            
+            # Set cookie and CORS headers
+            resp.set_cookie(
+                "token",
+                token,
+                httponly=True,
+            )
+            
+            # Add CORS headers to allow credentials
+            resp.headers.add("Access-Control-Allow-Origin", "https://devdistruct.com")
+            resp.headers.add("Access-Control-Allow-Credentials", "true")
+            resp.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            resp.headers.add("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+            
+            return resp
+            
+        except Exception as e:
+            print(f"Login error: {str(e)}")
+            traceback.print_exc()
+            return {"error": f"Login failed: {str(e)}"}, 500
 
 @auth_ns.route('/me')
 class CurrentUser(Resource):
@@ -174,7 +239,7 @@ class CurrentUser(Resource):
 class GitHubLogin(Resource):
     def get(self):
         """Initiate GitHub OAuth flow"""
-        redirect_uri = "https://devdistruct.com/api/api/auth/callback/github"
+        redirect_uri = "https://devdistruct.com/api/api/auth/github/callback"
         return oauth.github.authorize_redirect(redirect_uri)
 
 @auth_ns.route('/github/callback')

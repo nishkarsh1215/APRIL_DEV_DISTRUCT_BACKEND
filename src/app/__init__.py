@@ -3,6 +3,7 @@ from flask import request, jsonify
 from flask import Flask
 from dotenv import load_dotenv
 from flask_cors import CORS
+import logging
 
 from infra.db.db_config import init_db
 from infra.swagger import api
@@ -18,7 +19,23 @@ load_dotenv()
 def create_app():
     app = Flask(__name__, template_folder="../templates")
     app.url_map.strict_slashes = False
-
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Debug request information
+    @app.before_request
+    def log_request_info():
+        app.logger.info(f"Request: {request.method} {request.url}")
+        app.logger.info(f"Headers: {request.headers}")
+        if request.is_json:
+            app.logger.info(f"JSON Data: {request.get_json()}")
+        elif request.form:
+            app.logger.info(f"Form Data: {request.form}")
+    
     @app.before_request
     def check_credits():
         if request.endpoint in ['files']:
@@ -55,5 +72,15 @@ def create_app():
     api.add_namespace(auth_ns, path='/api/auth')
     api.add_namespace(chat_ns, path='/api/chat')
     api.add_namespace(order_ns, path='/api/order')
+    
+    # Additional debug endpoint for testing
+    @app.route('/api/test/ping', methods=['GET', 'POST'])
+    def test_ping():
+        """Simple endpoint to verify API connectivity"""
+        return jsonify({
+            "message": "pong",
+            "status": "ok",
+            "timestamp": datetime.now().isoformat()
+        })
     
     return app
