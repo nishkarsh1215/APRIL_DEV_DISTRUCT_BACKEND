@@ -174,7 +174,7 @@ class CurrentUser(Resource):
 class GitHubLogin(Resource):
     def get(self):
         """Initiate GitHub OAuth flow"""
-        redirect_uri = url_for('auth_git_hub_callback', _external=True)
+        redirect_uri = "https://devdistruct.com/api/api/auth/callback/github"
         return oauth.github.authorize_redirect(redirect_uri)
 
 @auth_ns.route('/github/callback')
